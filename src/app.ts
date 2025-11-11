@@ -24,9 +24,7 @@ app.use(cookieParser());
 const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
-  "https://lz-fly-xlgc.vercel.app",
-  "https://lz-fly-xlgc-9pcl989fa-fahimhossen2x-1772s-projects.vercel.app",
-  "https://lz-fly.vercel.app",
+  "https://lz-fly-frontend.vercel.app",
 ];
 
 app.use(
