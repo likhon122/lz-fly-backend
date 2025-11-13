@@ -189,7 +189,7 @@ export const downloadDesignFile = async (
 ): Promise<void> => {
   try {
     const { designId } = req.params;
-    const userId = (req as AuthRequest).user?._id ;
+    const userId = (req as AuthRequest).user?._id;
 
     if (!userId) {
       res.status(401).json({
@@ -248,8 +248,6 @@ export const downloadDesignFile = async (
       : "download";
     const filename = `${titleSafe}.${fileFormat}`.replace(/\.+$/, "");
 
-   
-
     const secureUrl = String(downloadable.secure_url ?? "");
 
     // Record the download
@@ -280,6 +278,8 @@ export const downloadDesignFile = async (
         { new: true },
       );
     }
+
+    console.log(secureUrl);
 
     // Always stream the file from Cloudinary to the client
     if (secureUrl) {
@@ -467,7 +467,10 @@ export const getUserDownloads = async (
 
     const downloads = await Download.find(filter)
       .populate("design", "title previewImageUrl price designerName")
-      .populate("purchase", "purchaseType amount currency currencyDisplay currencyDisplay")
+      .populate(
+        "purchase",
+        "purchaseType amount currency currencyDisplay currencyDisplay",
+      )
       .sort(sort)
       .skip(skip)
       .limit(limitNum)

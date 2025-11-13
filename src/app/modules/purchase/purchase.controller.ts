@@ -314,16 +314,118 @@ export const getAllPurchases = async (
     sort[sortBy as string] = sortOrder === "desc" ? -1 : 1;
 
     const purchases = await Purchase.find(filter)
-      .populate("user", "name email")
-      .populate("design", "title basePrice discountedPrice currencyDisplay currencyCode")
-      .populate("pricingPlan", "name description price finalPrice duration")
+      .populate("user", "name email profileImage role")
+      .populate("design", "title basePrice discountedPrice currencyDisplay currencyCode previewImageUrls")
+      .populate("pricingPlan", "name description price finalPrice duration maxDownloads features")
       .sort(sort)
       .skip(skip)
-      .limit(limitNum);
+      .limit(limitNum)
+      .select("-__v");
 
     const totalPurchases = await Purchase.countDocuments(filter);
     const totalPages = Math.ceil(totalPurchases / limitNum);
 
+    // Calculate rich statistics for the admin dashboard
+    const statsAggregation = await Purchase.aggregate([
+      { $match: filter },
+      {
+        $facet: {
+          // Revenue statistics
+          revenueStats: [
+            {
+              $group: {
+                _id: null,
+                totalRevenue: { $sum: "$amount" },
+                averageOrderValue: { $avg: "$amount" },
+                maxOrderValue: { $max: "$amount" },
+                minOrderValue: { $min: "$amount" },
+              },
+            },
+          ],
+          // Status breakdown
+          statusBreakdown: [
+            {
+              $group: {
+                _id: "$status",
+                count: { $sum: 1 },
+                totalAmount: { $sum: "$amount" },
+              },
+            },
+          ],
+          // Purchase type breakdown
+          typeBreakdown: [
+            {
+              $group: {
+                _id: "$purchaseType",
+                count: { $sum: 1 },
+                totalAmount: { $sum: "$amount" },
+              },
+            },
+          ],
+          // Payment method breakdown
+          paymentMethodBreakdown: [
+            {
+              $group: {
+                _id: "$paymentMethod",
+                count: { $sum: 1 },
+                totalAmount: { $sum: "$amount" },
+              },
+            },
+          ],
+          // Recent activity (last 7 days comparison)
+          recentTrend: [
+            {
+              $match: {
+                purchaseDate: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+              },
+            },
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$purchaseDate" } },
+                count: { $sum: 1 },
+                revenue: { $sum: "$amount" },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ],
+          // Top customers
+          topCustomers: [
+            { $match: { status: "completed" } },
+            {
+              $group: {
+                _id: "$user",
+                totalSpent: { $sum: "$amount" },
+                purchaseCount: { $sum: 1 },
+              },
+            },
+            { $sort: { totalSpent: -1 } },
+            { $limit: 5 },
+            {
+              $lookup: {
+                from: "users",
+                localField: "_id",
+                foreignField: "_id",
+                as: "userDetails",
+              },
+            },
+            { $unwind: "$userDetails" },
+            {
+              $project: {
+                userId: "$_id",
+                name: "$userDetails.name",
+                email: "$userDetails.email",
+                totalSpent: 1,
+                purchaseCount: 1,
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const stats = statsAggregation[0] || {};
+
+    // Format the response with enhanced data
     res.status(200).json({
       success: true,
       message: "Purchases retrieved successfully",
@@ -335,6 +437,37 @@ export const getAllPurchases = async (
         itemsPerPage: limitNum,
         hasNextPage: pageNum < totalPages,
         hasPrevPage: pageNum > 1,
+      },
+      statistics: {
+        revenue: {
+          total: stats.revenueStats?.[0]?.totalRevenue || 0,
+          average: stats.revenueStats?.[0]?.averageOrderValue || 0,
+          highest: stats.revenueStats?.[0]?.maxOrderValue || 0,
+          lowest: stats.revenueStats?.[0]?.minOrderValue || 0,
+        },
+        breakdown: {
+          byStatus: stats.statusBreakdown || [],
+          byType: stats.typeBreakdown || [],
+          byPaymentMethod: stats.paymentMethodBreakdown || [],
+        },
+        trends: {
+          last7Days: stats.recentTrend || [],
+        },
+        topCustomers: stats.topCustomers || [],
+      },
+      filters: {
+        status: status || null,
+        paymentMethod: paymentMethod || null,
+        purchaseType: purchaseType || null,
+        amountRange: {
+          min: minAmount || null,
+          max: maxAmount || null,
+        },
+        dateRange: {
+          start: startDate || null,
+          end: endDate || null,
+        },
+        search: search || null,
       },
     });
   } catch (error) {
@@ -782,102 +915,254 @@ export const getPurchaseAnalytics = async (
       }
     }
 
-    // Get overall purchase statistics
-    const overallStats = await Purchase.aggregate([
+    // Enhanced analytics with multiple facets
+    const analyticsData = await Purchase.aggregate([
       { $match: dateFilter },
       {
-        $group: {
-          _id: null,
-          totalPurchases: { $sum: 1 },
-          totalRevenue: { $sum: "$amount" },
-          activePurchases: {
-            $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
-          },
-          pendingPurchases: {
-            $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
-          },
-          cancelledPurchases: {
-            $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] },
-          },
-          averageOrderValue: { $avg: "$amount" },
+        $facet: {
+          // Overall statistics
+          overallStats: [
+            {
+              $group: {
+                _id: null,
+                totalPurchases: { $sum: 1 },
+                totalRevenue: { $sum: "$amount" },
+                completedPurchases: {
+                  $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+                },
+                pendingPurchases: {
+                  $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
+                },
+                cancelledPurchases: {
+                  $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] },
+                },
+                refundedPurchases: {
+                  $sum: { $cond: [{ $eq: ["$status", "refunded"] }, 1, 0] },
+                },
+                averageOrderValue: { $avg: "$amount" },
+                maxOrderValue: { $max: "$amount" },
+                minOrderValue: { $min: "$amount" },
+                uniqueCustomers: { $addToSet: "$user" },
+              },
+            },
+            {
+              $project: {
+                totalPurchases: 1,
+                totalRevenue: 1,
+                completedPurchases: 1,
+                pendingPurchases: 1,
+                cancelledPurchases: 1,
+                refundedPurchases: 1,
+                averageOrderValue: 1,
+                maxOrderValue: 1,
+                minOrderValue: 1,
+                uniqueCustomers: { $size: "$uniqueCustomers" },
+                conversionRate: {
+                  $multiply: [
+                    { $divide: ["$completedPurchases", "$totalPurchases"] },
+                    100,
+                  ],
+                },
+              },
+            },
+          ],
+          // Status breakdown with percentages
+          statusBreakdown: [
+            {
+              $group: {
+                _id: "$status",
+                count: { $sum: 1 },
+                totalAmount: { $sum: "$amount" },
+              },
+            },
+            { $sort: { count: -1 } },
+          ],
+          // Payment method analysis
+          paymentMethodBreakdown: [
+            {
+              $group: {
+                _id: "$paymentMethod",
+                count: { $sum: 1 },
+                totalAmount: { $sum: "$amount" },
+                averageAmount: { $avg: "$amount" },
+              },
+            },
+            { $sort: { totalAmount: -1 } },
+          ],
+          // Purchase type analysis (individual vs subscription)
+          purchaseTypeBreakdown: [
+            {
+              $group: {
+                _id: "$purchaseType",
+                count: { $sum: 1 },
+                totalRevenue: { $sum: "$amount" },
+                averageValue: { $avg: "$amount" },
+              },
+            },
+          ],
+          // Top pricing plans
+          topPlans: [
+            { $match: { purchaseType: "subscription", pricingPlan: { $exists: true } } },
+            {
+              $group: {
+                _id: "$pricingPlan",
+                subscriptionCount: { $sum: 1 },
+                totalRevenue: { $sum: "$amount" },
+              },
+            },
+            { $sort: { subscriptionCount: -1 } },
+            { $limit: 10 },
+            {
+              $lookup: {
+                from: "pricingplans",
+                localField: "_id",
+                foreignField: "_id",
+                as: "planDetails",
+              },
+            },
+            { $unwind: "$planDetails" },
+            {
+              $project: {
+                planId: "$_id",
+                planName: "$planDetails.name",
+                planDuration: "$planDetails.duration",
+                subscriptionCount: 1,
+                totalRevenue: 1,
+                averageRevenue: { $divide: ["$totalRevenue", "$subscriptionCount"] },
+              },
+            },
+          ],
+          // Top purchased designs
+          topDesigns: [
+            { $match: { purchaseType: "individual", design: { $exists: true } } },
+            {
+              $group: {
+                _id: "$design",
+                purchaseCount: { $sum: 1 },
+                totalRevenue: { $sum: "$amount" },
+              },
+            },
+            { $sort: { purchaseCount: -1 } },
+            { $limit: 10 },
+            {
+              $lookup: {
+                from: "designs",
+                localField: "_id",
+                foreignField: "_id",
+                as: "designDetails",
+              },
+            },
+            { $unwind: "$designDetails" },
+            {
+              $project: {
+                designId: "$_id",
+                designTitle: "$designDetails.title",
+                purchaseCount: 1,
+                totalRevenue: 1,
+                averagePrice: { $divide: ["$totalRevenue", "$purchaseCount"] },
+              },
+            },
+          ],
+          // Revenue trend over time (daily breakdown)
+          revenueTrend: [
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$purchaseDate" } },
+                dailyRevenue: { $sum: "$amount" },
+                dailyOrders: { $sum: 1 },
+                completedOrders: {
+                  $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+                },
+              },
+            },
+            { $sort: { _id: 1 } },
+            {
+              $project: {
+                date: "$_id",
+                revenue: "$dailyRevenue",
+                orders: "$dailyOrders",
+                completedOrders: 1,
+                averageOrderValue: { $divide: ["$dailyRevenue", "$dailyOrders"] },
+              },
+            },
+          ],
+          // Currency distribution
+          currencyDistribution: [
+            {
+              $group: {
+                _id: "$currency",
+                count: { $sum: 1 },
+                totalAmount: { $sum: "$amount" },
+              },
+            },
+            { $sort: { totalAmount: -1 } },
+          ],
+          // Monthly recurring revenue (MRR) for subscriptions
+          subscriptionMetrics: [
+            {
+              $match: {
+                purchaseType: "subscription",
+                status: "completed",
+                subscriptionEndDate: { $gte: new Date() },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                activeSubscriptions: { $sum: 1 },
+                monthlyRecurringRevenue: { $sum: "$amount" },
+                averageSubscriptionValue: { $avg: "$amount" },
+              },
+            },
+          ],
         },
       },
     ]);
 
-    // Get purchase statistics by status
-    const statusStats = await Purchase.aggregate([
-      { $match: dateFilter },
-      {
-        $group: {
-          _id: "$status",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-    ]);
-
-    // Get purchase statistics by payment method
-    const paymentMethodStats = await Purchase.aggregate([
-      { $match: dateFilter },
-      {
-        $group: {
-          _id: "$paymentMethod",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-    ]);
-
-    // Get purchase statistics by pricing plan
-    const planStats = await Purchase.aggregate([
-      { $match: dateFilter },
-      {
-        $group: {
-          _id: "$pricingPlan",
-          count: { $sum: 1 },
-          totalAmount: { $sum: "$amount" },
-        },
-      },
-      {
-        $lookup: {
-          from: "pricingplans",
-          localField: "_id",
-          foreignField: "_id",
-          as: "planDetails",
-        },
-      },
-      {
-        $unwind: "$planDetails",
-      },
-      {
-        $project: {
-          planName: "$planDetails.name",
-          count: 1,
-          totalAmount: 1,
-        },
-      },
-      { $sort: { totalAmount: -1 } },
-    ]);
+    const analytics = analyticsData[0] || {};
 
     res.status(200).json({
       success: true,
       message: "Purchase analytics retrieved successfully",
       data: {
-        overview: overallStats[0] || {
+        summary: analytics.overallStats?.[0] || {
           totalPurchases: 0,
           totalRevenue: 0,
-          activePurchases: 0,
+          completedPurchases: 0,
           pendingPurchases: 0,
           cancelledPurchases: 0,
+          refundedPurchases: 0,
           averageOrderValue: 0,
+          maxOrderValue: 0,
+          minOrderValue: 0,
+          uniqueCustomers: 0,
+          conversionRate: 0,
         },
-        statusBreakdown: statusStats,
-        paymentMethodBreakdown: paymentMethodStats,
-        planBreakdown: planStats,
-        period,
-        dateRange: {
-          startDate: dateFilter.purchaseDate?.$gte || "All time",
-          endDate: dateFilter.purchaseDate?.$lte || "Present",
+        breakdowns: {
+          status: analytics.statusBreakdown || [],
+          paymentMethod: analytics.paymentMethodBreakdown || [],
+          purchaseType: analytics.purchaseTypeBreakdown || [],
+          currency: analytics.currencyDistribution || [],
+        },
+        topPerformers: {
+          plans: analytics.topPlans || [],
+          designs: analytics.topDesigns || [],
+        },
+        trends: {
+          revenue: analytics.revenueTrend || [],
+        },
+        subscriptions: analytics.subscriptionMetrics?.[0] || {
+          activeSubscriptions: 0,
+          monthlyRecurringRevenue: 0,
+          averageSubscriptionValue: 0,
+        },
+        metadata: {
+          period,
+          dateRange: {
+            start: dateFilter.purchaseDate?.$gte || "All time",
+            end: dateFilter.purchaseDate?.$lte || "Present",
+          },
+          generatedAt: new Date().toISOString(),
         },
       },
     });

@@ -57,6 +57,7 @@ export const validateBody = (schema: AnyZodObject | ZodSchema) => {
       req.body = validatedData.body;
       next();
     } catch (error) {
+      console.log(error);
       if (error instanceof ZodError) {
         const validationErrors: ValidationError[] = error.issues.map(
           (issue) => ({
