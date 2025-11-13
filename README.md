@@ -1,4 +1,4 @@
-# 🎨 Design Portfolio Marketplace - Backend API# 🎨 Ecommerce Design Platform - Complete API Documentation
+# 🎨 FLY Portfolio Marketplace - Backend API# 🎨 Ecommerce Design Platform - Complete API Documentation
 
 > A robust, production-ready Express.js REST API for a design marketplace platform with user authentication, OAuth integration, payment processing, and file management.## 📋 Table of Contents
 
@@ -1709,9 +1709,8 @@ This documentation is updated with each API release. Check the version number an
 
 ### Contact
 
-- **Developer**: Rimon Hossain
-- **Email**: support@yourplatform.com
-- **GitHub**: [Repository Link]
+- **Developer**: Likhon Islam
+- **Email**: md.likhonislam2x@gmail.com
 
 ---
 
