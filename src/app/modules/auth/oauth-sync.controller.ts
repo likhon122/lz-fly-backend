@@ -3,14 +3,24 @@ import { User } from "../user/user.model";
 import jwt from "jsonwebtoken";
 import config from "../../config/index";
 
-// Create JWT token (reusing existing logic)
+// Create JWT token with robust fallback and validation
 const createToken = (userId: string, email: string, role: string): string => {
-  if (!config.jwt_secret) {
-    throw new Error("JWT secret is missing!");
+  const secret = config.jwt_secret;
+  if (!secret || secret === "YOUR_JWT_SECRET") {
+    throw new Error("JWT secret is not configured in backend .env!");
   }
 
-  return jwt.sign({ userId, email, role }, config.jwt_secret, {
-    expiresIn: config.jwt_expires_in || "7d",
+  let expiresIn: string | number = "7d";
+  if (
+    config.jwt_expires_in &&
+    config.jwt_expires_in !== "YOUR_JWT_EXPIRES_IN" &&
+    !config.jwt_expires_in.startsWith("YOUR_")
+  ) {
+    expiresIn = config.jwt_expires_in;
+  }
+
+  return jwt.sign({ userId, email, role }, secret, {
+    expiresIn,
   } as jwt.SignOptions);
 };
 
@@ -21,10 +31,10 @@ const createToken = (userId: string, email: string, role: string): string => {
  *
  * Flow:
  * 1. NextAuth completes OAuth with provider (Google/GitHub)
- * 2. NextAuth sends user data to this endpoint
- * 3. Backend finds/creates user in MongoDB
- * 4. Backend generates JWT token
- * 5. Frontend stores token and uses it for all API calls
+ * 2. NextAuth sends validated user data to this endpoint
+ * 3. Backend finds/creates user in MongoDB with active & deletion checks
+ * 4. Backend generates secure JWT token
+ * 5. Frontend receives token and uses it for all API calls
  */
 export const oauthSyncController = async (
   req: Request,
@@ -34,16 +44,17 @@ export const oauthSyncController = async (
     const { name, email, image, provider, providerId } = req.body;
 
     // Validate required fields
-    if (!email || !provider) {
+    if (!email || typeof email !== "string" || !provider || typeof provider !== "string") {
       res.status(400).json({
         success: false,
-        message: "Email and provider are required",
+        message: "Valid email and provider are required",
       });
       return;
     }
 
     // Validate provider
-    if (!["google", "github"].includes(provider)) {
+    const normalizedProvider = provider.toLowerCase().trim();
+    if (!["google", "github"].includes(normalizedProvider)) {
       res.status(400).json({
         success: false,
         message: "Invalid provider. Must be 'google' or 'github'",
@@ -51,28 +62,46 @@ export const oauthSyncController = async (
       return;
     }
 
+    const normalizedEmail = email.toLowerCase().trim();
+
     // Check if user exists by email
-    let user = await User.findOne({ email });
+    let user = await User.findOne({ email: normalizedEmail });
 
     if (user) {
-      // User exists - update OAuth fields if not already set
-      const updateFields: Record<string, string> = {};
-
-      // Update provider-specific ID
-      if (provider === "google" && !user.googleId) {
-        updateFields.googleId = providerId;
-      } else if (provider === "github" && !user.githubId) {
-        updateFields.githubId = providerId;
+      // Security check: reject inactive or soft-deleted accounts
+      if (user.isDeleted) {
+        res.status(403).json({
+          success: false,
+          message: "This account has been deleted. Please contact support.",
+        });
+        return;
       }
 
-      // Update auth provider if still set to local
-      if (user.authProvider === "local") {
-        updateFields.authProvider = provider;
+      if (!user.isActive) {
+        res.status(403).json({
+          success: false,
+          message: "This account is inactive. Please contact support.",
+        });
+        return;
+      }
+
+      const updateFields: Record<string, string> = {};
+
+      // Link provider-specific ID safely
+      if (normalizedProvider === "google" && !user.googleId && providerId) {
+        updateFields.googleId = String(providerId);
+      } else if (normalizedProvider === "github" && !user.githubId && providerId) {
+        updateFields.githubId = String(providerId);
       }
 
       // Update profile image if user doesn't have one
-      if (image && !user.profileImage) {
+      if (image && typeof image === "string" && !user.profileImage) {
         updateFields.profileImage = image;
+      }
+
+      // Update user name if not currently set
+      if (name && typeof name === "string" && !user.name) {
+        updateFields.name = name.trim();
       }
 
       // Apply updates if any
@@ -85,20 +114,25 @@ export const oauthSyncController = async (
       }
     } else {
       // Create new user from OAuth data
+      const displayName =
+        (name && typeof name === "string" && name.trim()) ||
+        normalizedEmail.split("@")[0];
+
       const newUserData: Record<string, string | boolean | null> = {
-        name: name || email.split("@")[0], // Use email prefix if no name
-        email,
-        authProvider: provider,
+        name: displayName,
+        email: normalizedEmail,
+        authProvider: normalizedProvider,
         role: "customer",
         isActive: true,
-        profileImage: image || null,
+        isDeleted: false,
+        profileImage: (image && typeof image === "string") ? image : null,
       };
 
       // Set provider-specific ID
-      if (provider === "google") {
-        newUserData.googleId = providerId;
-      } else if (provider === "github") {
-        newUserData.githubId = providerId;
+      if (normalizedProvider === "google" && providerId) {
+        newUserData.googleId = String(providerId);
+      } else if (normalizedProvider === "github" && providerId) {
+        newUserData.githubId = String(providerId);
       }
 
       user = await User.create(newUserData);
@@ -113,25 +147,26 @@ export const oauthSyncController = async (
       return;
     }
 
-    // Generate JWT token
-    const token = createToken(user._id as string, user.email, user.role);
+    // Generate backend JWT token
+    const token = createToken(user._id.toString(), user.email, user.role);
 
-    // Set httpOnly cookie (optional - for extra security)
+    // Set secure httpOnly cookie
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("token", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "none",
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
-    // Return success response with token and user data
+    // Return success response with token and sanitized user data
     res.status(200).json({
       success: true,
       message: "OAuth sync successful",
       data: {
-        token, // This is YOUR backend JWT token (NextAuth will store this)
+        token, // Backend JWT token for NextAuth & Redux
         user: {
-          id: user._id,
+          id: user._id.toString(),
           name: user.name,
           email: user.email,
           role: user.role,

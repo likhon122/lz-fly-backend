@@ -20,17 +20,16 @@ export const authenticate = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
-    // Get token from cookie OR Authorization header
-    // Cookie: for traditional login
-    // Header: for OAuth login (NextAuth sends token in Authorization header)
-    let token = req.cookies?.token;
-
-    // If no cookie, check Authorization header
+    // Get token from Authorization header (primary) OR cookie (fallback)
+    // Header: for OAuth & client requests with stored token
+    // Cookie: for traditional login with httpOnly cookies
+    let token: string | undefined;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.substring(7); // Remove "Bearer " prefix
+    }
     if (!token) {
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith("Bearer ")) {
-        token = authHeader.substring(7); // Remove "Bearer " prefix
-      }
+      token = req.cookies?.token;
     }
 
     if (!token) {
@@ -42,10 +41,24 @@ export const authenticate = async (
       return;
     }
 
-    const decoded = jwt.verify(
-      token,
-      config.jwt_secret as string,
-    ) as JWTPayload;
+    let decoded: JWTPayload;
+    try {
+      decoded = jwt.verify(
+        token,
+        config.jwt_secret as string,
+      ) as JWTPayload;
+    } catch (jwtError) {
+      // Fallback: if header token failed, check if cookie has a different valid token
+      if (req.cookies?.token && req.cookies.token !== token) {
+        decoded = jwt.verify(
+          req.cookies.token,
+          config.jwt_secret as string,
+        ) as JWTPayload;
+      } else {
+        throw jwtError;
+      }
+    }
+
     const user = await User.findById(decoded.userId).select("-isDeleted");
 
     if (!user) {
@@ -88,7 +101,13 @@ export const authorize = (...roles: string[]) => {
       return;
     }
 
-    if (!roles.includes(req.user.role)) {
+    const userRole = req.user.role;
+    // super_admin always has access to all admin-level routes
+    const isAuthorized =
+      roles.includes(userRole) ||
+      (userRole === "super_admin" && (roles.includes("admin") || roles.length === 0));
+
+    if (!isAuthorized) {
       res.status(403).json({
         success: false,
         message:

@@ -92,6 +92,7 @@ const getPaymentStatusController = async (
 
     if (
       req.user?.role !== "admin" &&
+      req.user?.role !== "super_admin" &&
       paymentUserId !== req.user?._id?.toString()
     ) {
       res.status(403).json({
@@ -127,7 +128,7 @@ const refundPaymentController = async (
 ): Promise<void> => {
   try {
     // Check admin authorization
-    if (req.user?.role !== "admin") {
+    if (req.user?.role !== "admin" && req.user?.role !== "super_admin") {
       res.status(403).json({
         success: false,
         message: "Only admins can process refunds",

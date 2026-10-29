@@ -4,14 +4,24 @@ import jwt from "jsonwebtoken";
 import config from "../../config/index";
 import bcrypt from "bcrypt";
 
-// create JWT token
+// create JWT token with robust fallback
 const createToken = (userId: string, email: string, role: string): string => {
-  if (!config.jwt_secret) {
-    throw new Error("JWT secret is missing!");
+  const secret = config.jwt_secret;
+  if (!secret || secret === "YOUR_JWT_SECRET") {
+    throw new Error("JWT secret is not configured in backend .env!");
   }
 
-  return jwt.sign({ userId, email, role }, config.jwt_secret, {
-    expiresIn: config.jwt_expires_in || "24h",
+  let expiresIn: string | number = "7d";
+  if (
+    config.jwt_expires_in &&
+    config.jwt_expires_in !== "YOUR_JWT_EXPIRES_IN" &&
+    !config.jwt_expires_in.startsWith("YOUR_")
+  ) {
+    expiresIn = config.jwt_expires_in;
+  }
+
+  return jwt.sign({ userId, email, role }, secret, {
+    expiresIn,
   } as jwt.SignOptions);
 };
 
@@ -21,11 +31,11 @@ const registerUserController = async (
 ): Promise<void> => {
   try {
     const { name, email, password, role } = req.body;
-    // eslint-disable-next-line no-console
-    console.log(req.body);
 
-    //Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
       res.status(400).json({
         success: false,
@@ -36,8 +46,8 @@ const registerUserController = async (
 
     // Create new user
     const user = new User({
-      name,
-      email,
+      name: name.trim(),
+      email: normalizedEmail,
       password: await bcrypt.hash(password, config.bcrypt_salt_rounds), // Hash password before saving
       role: role || "customer",
     });
@@ -45,14 +55,15 @@ const registerUserController = async (
     await user.save();
 
     // Create JWT token for the new user
-    const token = createToken(user._id as string, user.email, user.role);
+    const token = createToken(user._id.toString(), user.email, user.role);
 
     // Set httpOnly cookie
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("token", token, {
-      httpOnly: true, // cannot be accessed by JS
-      secure: true, // only HTTPS in prod
-      sameSite: "none", // protects against CSRF
-      maxAge: 1000 * 60 * 60 * 24, // 1 day
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
     res.status(201).json({
@@ -60,13 +71,13 @@ const registerUserController = async (
       message: "User registered successfully",
       data: {
         user: {
-          id: user._id,
+          id: user._id.toString(),
           name: user.name,
           email: user.email,
           profileImage: user.profileImage,
           role: user.role,
         },
-        token: token, // ✅ Include token in response for frontend
+        token: token,
       },
     });
   } catch (error: unknown) {
@@ -83,13 +94,39 @@ const registerUserController = async (
 const loginController = async (req: Request, res: Response): Promise<void> => {
   try {
     const { email, password } = req.body;
+    const normalizedEmail = email.toLowerCase().trim();
 
     // Find user with email and include password for comparison
-    const user = await User.findOne({ email }).select("+password");
+    const user = await User.findOne({ email: normalizedEmail }).select("+password");
     if (!user) {
       res.status(401).json({
         success: false,
-        message: "User not exists with this email",
+        message: "User does not exist with this email",
+      });
+      return;
+    }
+
+    // Check if user is active or deleted
+    if (user.isDeleted) {
+      res.status(403).json({
+        success: false,
+        message: "This account has been deleted. Please contact support.",
+      });
+      return;
+    }
+
+    if (!user.isActive) {
+      res.status(403).json({
+        success: false,
+        message: "This account has been deactivated. Please contact support.",
+      });
+      return;
+    }
+
+    if (!user.password) {
+      res.status(400).json({
+        success: false,
+        message: "This account was registered using OAuth (Google or GitHub). Please sign in with that provider.",
       });
       return;
     }
@@ -102,20 +139,21 @@ const loginController = async (req: Request, res: Response): Promise<void> => {
     if (!isPasswordValid) {
       res.status(401).json({
         success: false,
-        message: "Invalid password Please try again with correct password",
+        message: "Invalid password. Please try again with correct password.",
       });
       return;
     }
 
     // Create JWT token for successful login
-    const token = createToken(user._id as string, user.email, user.role);
+    const token = createToken(user._id.toString(), user.email, user.role);
 
     // Set httpOnly cookie
+    const isProduction = process.env.NODE_ENV === "production";
     res.cookie("token", token, {
-      httpOnly: true, // cannot be accessed by JS
-      secure: true, // only HTTPS in prod
-      sameSite: "none", // protects against CSRF
-      maxAge: 1000 * 60 * 60 * 24, // 1 day
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
     res.status(200).json({
@@ -123,13 +161,13 @@ const loginController = async (req: Request, res: Response): Promise<void> => {
       message: "Login successful",
       data: {
         user: {
-          id: user._id,
+          id: user._id.toString(),
           name: user.name,
           email: user.email,
           profileImage: user.profileImage || "",
           role: user.role,
         },
-        token: token, // ✅ Include token in response for frontend
+        token: token,
       },
     });
   } catch (error: unknown) {
@@ -144,18 +182,11 @@ const loginController = async (req: Request, res: Response): Promise<void> => {
 };
 
 const logoutController = (req: Request, res: Response): void => {
-  if (!req.cookies || !req.cookies.token) {
-    res.status(400).json({
-      success: false,
-      message: "No active session found! You are already logged out.",
-    });
-    return;
-  }
-
+  const isProduction = process.env.NODE_ENV === "production";
   res.clearCookie("token", {
     httpOnly: true,
-    secure: true,
-    sameSite: "none",
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
   });
   res.status(200).json({
     success: true,
